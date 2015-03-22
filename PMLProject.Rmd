@@ -1,0 +1,140 @@
+---
+title: "Practical Machine Learning - Project"
+author: "Chenchal Subraveti"
+date: "March 16, 2015"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+## Executive Summary
+The training data set was split to train and validate sets with 80% data in the train set. Data was Pre-processed and 52 numeric variables were used as predictors for modelling the 5 classes of exercises in the data. A random forest method with 3 fold cross-validation with 3 repeats of multifold indexed data of training set was used to train the model. PCA needed 25 components to capture 95 percent of the variance. The accuracy of prediction on the validation set was assessed to be 97.8%.  The random forest model was used to predict the results for the test data. 
+
+## Getting & Cleaning Data
+Set seed for reproducible results. Load the training data and split it into a _train_ set and a
+_validate_ set.  The _validate_ set will be used to check prediction accuracy of the model.
+
+```{r loadData, cache=TRUE, warning=FALSE}
+set.seed(16031)
+HAR <- read.csv("data/pml-training.csv", na.strings = c("NA", ""))
+library(caret)
+inTrain<-createDataPartition(y=HAR$classe, p=0.8,list=F)
+train<-HAR[inTrain,]; validate<-HAR[-inTrain,]
+```
+
+The data set is composed of **159** variables for predicting the outcome _**classe**_. These predictors were classified into different sets:
+
+1.  Predictors with **NA** values (100): Predictors with NA values do not contribute to the outcome. 
+
+2.  Predictors with very low **variance** (1): Predictors with very low variance do not contribute differentially to the outcome. The _nearZeroVar_ function is used to find low variabliity variables. Only one binary valued variable is found as a near zero variance, where the proportion of uniqueness is very low.
+
+3.  Predictors with inertial measurement data (52): After exploring data further and reading the [paper](http://perceptual.mpi-inf.mpg.de/files/2013/03/velloso13_ah.pdf), I decided to use only variables that were either data that was measured from the sensors or derived from these measurements. There were a total of 13 variables for each of the 4 sensors, _viz_ **belt**, **arm**, **forearm**, and **dumbell**. Of the 13 variables, 9 (9 degrees of freedom) variables are data along *x-, y-, and z-axes* in inertial measurements from *accelerometer, gyroscope, and magnetometer* in each of the sensors. For each sensor, there 4 additional derived variables  for *pitch, yaw, roll, and total acceleration*. The table below shows these varaibles.  This reduced the number of predictors from **159** to **52** (13 x 4) predictors for the *classe* of the exercise.
+
+4.  Predictors for house-keeping (6): There are timestamps, dates, names of subjects and row numbers
+
+```{r tidyData, dependson="loadData", cache=TRUE, warning=FALSE}
+sensorCols<-function(n){
+  b<-n[grep("*_belt*",n)]
+  a<-n[grep("*_arm*",n)]
+  fa<-n[grep("*_forearm*",n)]
+  d<-n[grep("*_dumb*",n)]
+  data.frame(BELT=b,ARM=a,FOREARM=fa,DUMBELL=d)
+}
+
+# Predictors: NA
+naCols<-which(colSums(is.na(train))>0)
+naColNames<-colnames(train)[naCols]
+print(sensorCols(naColNames),row.names=FALSE)
+# Predictors: Near Zero Var
+nzvCols<-nearZeroVar(train[,-naCols])
+nzvColNames<-colnames(train[,-naCols])[nzvCols]
+print(nzvColNames)
+# Predictors: sensor data and derived data complete cases
+pn<-colnames(train)[-c(naCols,nzvCols)]
+predictors<-pn[grep("_belt|_arm|_forearm|_dumb",pn)]
+print(sensorCols(predictors), row.names=FALSE)
+# Predictors: house-keeping
+n<-names(train)
+other<-c(naColNames,nzvColNames,predictors,"classe")
+houz<-n[-which(n %in% other)]
+print(houz)
+
+print(data.frame(NAs=length(naColNames),NZVs=length(nzvColNames), PREDICTORS=length(predictors),HOUSE_KEEPING=length(houz)), row.names=FALSE)
+
+dataCols<-which(names(train) %in% c("classe",predictors))
+outcome<-53
+train<-train[,dataCols]
+validate<-validate[,dataCols]
+
+```
+
+
+## Exploratory Data Analysis
+Analysis of the correlation of variables and **PCA* shows that in order to explain 95% of the variance we would need 25 PCs. This could achieve the objectives of **Reducing variables** and **Feature extraction**
+However, since the problem is a classification problem, a tree-based modeling is explored. 
+
+```{r xcorrPca, dependson="tidyData", cache=TRUE, warning=FALSE}
+xcorr<-abs(cor(train[,-outcome]))
+diag(xcorr)<-0
+nCorr<-length(which(xcorr>0.8,arr.ind = TRUE ))
+preProc <- preProcess(train[, -outcome], method = c("center","scale", "pca"))
+preProc
+```
+
+## Machine learning
+### Model Selection
+While tree based classification modeles do provide rules for classification, bagging of trees is shown to improve prediction accuracy through model aggregation. Randon forest ensemble techniques would reduce the bias the selection of "unfortunate" groups in single tree methods through resampling of data.
+
+The _createMultiFolds()_ and _trainControl()_ functions can be used to control for doing _repeated cross-validation_. 
+Two folds with 5 partitions of the train data was used as index to create 3-fold cross-validation with 3 repeats during training.
+
+```{r rf, dependson="tidyData",cache=TRUE, warning=FALSE}
+folds<- createMultiFolds(train$classe, k=2, times=5)
+trainCtrl<-trainControl(method="cv", number=3, repeats = 3, index=folds, classProbs = TRUE,allowParallel = TRUE, verboseIter = FALSE)
+
+rfFit<-train(classe ~ ., data=train, method = "rf", prox=TRUE, trControl = trainCtrl, preProcess = c("center","scale", "pca"))
+rfFit
+```
+
+The final model shows the **OOB** error rate to be 1.96%. The resampling was 3-fold cross-validated.
+
+```{r finalModel, dependson="rf", cache=TRUE, warning=FALSE}
+rfFit$finalModel
+```
+
+### Validation of the model
+Check prediction with validation set and compute the accuracy. The confusion matrix for the validation set is shown below. 
+
+```{r validate, dependson="rf", cache=TRUE, warning=FALSE}
+vPredict<-predict(rfFit,newdata=validate[,-outcome])
+vConfusionMatrix<-confusionMatrix(vPredict,validate$classe)
+vConfusionMatrix
+```
+The accuracy of prediction for validation set was `r vConfusionMatrix$overall[1]*100`%.
+
+## Test Model
+
+```{r test, dependson="rf", cache=TRUE, warning=FALSE}
+testData <- read.csv("data/pml-testing.csv", na.strings = c("NA", ""))
+test<-testData[,dataCols]
+tPredict<-predict(rfFit,newdata=test[,-outcome])
+
+print(tPredict)
+
+```
+
+
+### Upload prediction results 
+```{r uploadResults, dependson="test", cache=TRUE, warning=FALSE}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("answers/problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+#pml_write_files(as.character(tPredict))
+
+```
+
